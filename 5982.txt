@@ -1,0 +1,74 @@
+From eef0e0ead3107d45c940480a40f66b7077f190bb Mon Sep 17 00:00:00 2001
+From: "Erik M. Bray" <embray@stsci.edu>
+Date: Thu, 18 Jun 2015 18:52:16 -0400
+Subject: [PATCH] BUG: Fixed slicing of chararrays on Python 3.
+
+When taking a slice of a chararray it was calling the rstrip() method
+on the resulting slice, resulting in a new array rather than a view
+of the original.  This was an unintended consequence of the sq_slice
+member of the tp_as_sequence mapping being ignored in Python 3, so
+that slice lookups go directly through __getitem__.
+
+Fix test_expandtabs to not make the assumption that rstrip() will be applied twice to a value when using T[x][y] style indexing.
+---
+ numpy/core/defchararray.py            |  4 +++-
+ numpy/core/tests/test_defchararray.py | 19 ++++++++++++++++++-
+ 2 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/numpy/core/defchararray.py b/numpy/core/defchararray.py
+index cc6cb5a..92ea820 100644
+--- a/numpy/core/defchararray.py
++++ b/numpy/core/defchararray.py
+@@ -1849,12 +1849,14 @@ def __array_finalize__(self, obj):
+ 
+     def __getitem__(self, obj):
+         val = ndarray.__getitem__(self, obj)
+-        if issubclass(val.dtype.type, character) and not _len(val) == 0:                  ###############动态特性 issubclass
++
++        if isinstance(val, character):                                                    ###############动态特性 isinstance
+             temp = val.rstrip()
+             if _len(temp) == 0:
+                 val = ''
+             else:
+                 val = temp
++
+         return val
+ 
+     # IMPLEMENTATION NOTE: Most of the methods of this class are
+diff --git a/numpy/core/tests/test_defchararray.py b/numpy/core/tests/test_defchararray.py
+index 2b45ba4..a611f85 100644
+--- a/numpy/core/tests/test_defchararray.py
++++ b/numpy/core/tests/test_defchararray.py
+@@ -329,7 +329,7 @@ def test_encode(self):
+ 
+     def test_expandtabs(self):
+         T = self.A.expandtabs()
+-        assert_(T[2][0] == asbytes('123      345'))
++        assert_(T[2, 0] == asbytes('123      345 \0'))
+ 
+     def test_join(self):
+         if sys.version_info[0] >= 3:
+@@ -629,6 +629,23 @@ def test_rmod(self):
+                 self.fail("chararray __rmod__ should fail with " \
+                           "non-string objects")
+ 
++    def test_slice(self):
++        """Regression test for https://github.com/numpy/numpy/issues/5982"""
++
++        arr = np.array([['abc ', 'def '], ['geh ', 'ijk ']],
++                       dtype='S4').view(np.chararray)
++        sl1 = arr[:]
++        assert_array_equal(sl1, arr)
++        assert sl1.base is arr
++        assert sl1.base.base is arr.base
++
++        sl2 = arr[:, :]
++        assert_array_equal(sl2, arr)
++        assert sl2.base is arr
++        assert sl2.base.base is arr.base
++
++        assert arr[0, 0] == asbytes('abc')
++
+ 
+ def test_empty_indexing():
+     """Regression test for ticket 1948."""
