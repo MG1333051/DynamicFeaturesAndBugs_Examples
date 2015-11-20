@@ -1,0 +1,38 @@
+From 48a105538a02344d5b7ecc2eb74e6126dd097f6c Mon Sep 17 00:00:00 2001
+From: behrisch <behrisch@users.sourceforge.net>
+Date: Sun, 4 Oct 2015 20:16:38 +0200
+Subject: [PATCH] Update __init__.py
+
+---
+ numpy/core/__init__.py | 17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/numpy/core/__init__.py b/numpy/core/__init__.py
+index 41314ce..16dcbe0 100644
+--- a/numpy/core/__init__.py
++++ b/numpy/core/__init__.py
+@@ -6,15 +6,16 @@
+ # disables OpenBLAS affinity setting of the main thread that limits
+ # python threads or processes to one core
+ import os
+-envbak = os.environ.copy()
+-if 'OPENBLAS_MAIN_FREE' not in os.environ:
+-    os.environ['OPENBLAS_MAIN_FREE'] = '1'
+-if 'GOTOBLAS_MAIN_FREE' not in os.environ:
+-    os.environ['GOTOBLAS_MAIN_FREE'] = '1'
++env_added = []
++for envkey in ['OPENBLAS_MAIN_FREE', 'GOTOBLAS_MAIN_FREE']:
++    if envkey not in os.environ:
++        os.environ[envkey] = '1'
++        env_added.append(envkey)
+ from . import multiarray
+-os.environ.clear()
+-os.environ.update(envbak)
+-del envbak                                    #####################动态特性 del 
++for envkey in env_added:
++    del os.environ[envkey]
++del envkey                                       #####################动态特性 del 
++del env_added                                       #####################动态特性 del 
+ del os                                             #####################动态特性 del 
+ 
+ from . import umath
