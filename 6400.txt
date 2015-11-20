@@ -1,0 +1,124 @@
+From b3dfa8de56c4a892db58284aebe7554e25829c64 Mon Sep 17 00:00:00 2001
+From: Jonathan Helmus <jjhelmus@gmail.com>
+Date: Fri, 2 Oct 2015 09:36:20 -0500
+Subject: [PATCH 1/3] STY: Remove trailing whitespace from numpy/ma/core.py
+
+---
+ numpy/ma/core.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/numpy/ma/core.py b/numpy/ma/core.py
+index 61f0c12..43c92f1 100644
+--- a/numpy/ma/core.py
++++ b/numpy/ma/core.py
+@@ -6816,7 +6816,7 @@ def resize(x, new_shape):
+     return result
+ 
+ 
+-def rank(obj):                                 #####################动态特性 del
++def rank(obj):                                 #####################动态特性 del
+     """
+     maskedarray version of the numpy function.
+ 
+@@ -6833,7 +6833,7 @@ def rank(obj):
+ rank.__doc__ = np.rank.__doc__
+ 
+ 
+-def ndim(obj):                                    #####################动态特性 del
++def ndim(obj):                                   #####################动态特性 del
+     """
+     maskedarray version of the numpy function.
+ 
+
+From 7744de5cb61f279a05f5a8b139e5a8a58b4d8c98 Mon Sep 17 00:00:00 2001
+From: Jonathan Helmus <jjhelmus@gmail.com>
+Date: Fri, 2 Oct 2015 10:13:38 -0500
+Subject: [PATCH 2/3] BUG: numpy.ma.round works on zero dimensional arrays
+
+numpy.ma.round returns a scalar or np.ma.masked when called with a zero
+dimensional array.  This behavior is consistent with numpy.round.
+
+closes #2244
+---
+ numpy/ma/core.py            |  8 ++++++--
+ numpy/ma/tests/test_core.py | 25 +++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/numpy/ma/core.py b/numpy/ma/core.py
+index 43c92f1..ba9643d 100644
+--- a/numpy/ma/core.py
++++ b/numpy/ma/core.py
+@@ -5107,8 +5107,12 @@ def round(self, decimals=0, out=None):
+ 
+         """
+         result = self._data.round(decimals=decimals, out=out).view(type(self))
+-        result._mask = self._mask
+-        result._update_from(self)
++        if result.ndim:
++            result._mask = self._mask
++            result._update_from(self)
++        elif self._mask:
++            # Return masked when the scalar is masked
++            result = masked
+         # No explicit output: we're done
+         if out is None:
+             return result
+diff --git a/numpy/ma/tests/test_core.py b/numpy/ma/tests/test_core.py
+index aa6ce5d..07aaaac 100644
+--- a/numpy/ma/tests/test_core.py
++++ b/numpy/ma/tests/test_core.py
+@@ -3443,6 +3443,31 @@ def test_round_with_output(self):
+         result = xm.round(decimals=2, out=output)
+         self.assertTrue(result is output)
+ 
++    def test_round_with_scalar(self):
++        # Testing round with scalar/zero dimension input
++        # GH issue 2244
++        a = array(1.1, mask=[False])
++        assert_equal(a.round(), 1)
++
++        a = array(1.1, mask=[True])
++        assert_(a.round() is masked)
++
++        a = array(1.1, mask=[False])
++        output = np.empty(1, dtype=float)
++        output.fill(-9999)
++        a.round(out=output)
++        assert_equal(output, 1)
++
++        a = array(1.1, mask=[False])
++        output = array(-9999., mask=[True])
++        a.round(out=output)
++        assert_equal(output[()], 1)
++
++        a = array(1.1, mask=[True])
++        output = array(-9999., mask=[False])
++        a.round(out=output)
++        assert_(output[()] is masked)
++
+     def test_identity(self):
+         a = identity(5)
+         self.assertTrue(isinstance(a, MaskedArray))
+
+From 11dea9e4701d0b1a6e163e8a70d33d5fc806941a Mon Sep 17 00:00:00 2001
+From: Jonathan Helmus <jjhelmus@gmail.com>
+Date: Sun, 4 Oct 2015 08:10:47 -0500
+Subject: [PATCH 3/3] MAINT: More expressive if statement in np.ma.round
+
+---
+ numpy/ma/core.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/numpy/ma/core.py b/numpy/ma/core.py
+index ba9643d..38657ab 100644
+--- a/numpy/ma/core.py
++++ b/numpy/ma/core.py
+@@ -5107,7 +5107,7 @@ def round(self, decimals=0, out=None):
+ 
+         """
+         result = self._data.round(decimals=decimals, out=out).view(type(self))
+-        if result.ndim:
++        if result.ndim > 0:
+             result._mask = self._mask
+             result._update_from(self)
+         elif self._mask:

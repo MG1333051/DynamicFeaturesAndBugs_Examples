@@ -1,0 +1,60 @@
+From 02206a3652c5d92c03f82a4df578a1e5971db304 Mon Sep 17 00:00:00 2001
+From: "Nathaniel J. Smith" <njs@pobox.com>
+Date: Thu, 27 Aug 2015 00:21:40 -0700
+Subject: [PATCH] BUG: Fix refcounting for string comparison in
+ array_richcompare
+
+Regression introduced in 4b1f508a57549d8031a23160b40c7f87f47892ed
+
+Closes gh-6250.
+---
+ numpy/core/src/multiarray/arrayobject.c |  4 +++-
+ numpy/core/tests/test_regression.py     | 20 ++++++++++++++++++++
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/numpy/core/src/multiarray/arrayobject.c b/numpy/core/src/multiarray/arrayobject.c
+index 8d9187a..86ea38c 100644
+--- a/numpy/core/src/multiarray/arrayobject.c
++++ b/numpy/core/src/multiarray/arrayobject.c
+@@ -1311,7 +1311,9 @@ array_richcompare(PyArrayObject *self, PyObject *other, int cmp_op)
+             /* Never mind, carry on, see what happens */
+         }
+         else {
+-            return _strings_richcompare(self, array_other, cmp_op, 0);
++            result = _strings_richcompare(self, array_other, cmp_op, 0);
++            Py_DECREF(array_other);
++            return result;
+         }
+         /* If we reach this point, it means that we are not comparing
+          * string-to-string. It's possible that this will still work out,
+diff --git a/numpy/core/tests/test_regression.py b/numpy/core/tests/test_regression.py
+index 54da26d..3aba714 100644
+--- a/numpy/core/tests/test_regression.py
++++ b/numpy/core/tests/test_regression.py
+@@ -2152,6 +2152,26 @@ def f(x):
+         assert_equal(uf(a), ())
+         assert_array_equal(a, [[3, 2, 1], [5, 4], [9, 7, 8, 6]])
+ 
++    def test_leak_in_structured_dtype_comparison(self):
++        # gh-6250
++        recordtype = np.dtype([('a', np.float64),
++                               ('b', np.int32),
++                               ('d', (np.str, 5))])
++
++        # Simple case
++        a = np.zeros(2, dtype=recordtype)
++        for i in range(100):
++            a == a
++        assert_(sys.getrefcount(a) < 10)
++
++        # The case in the bug report.
++        before = sys.getrefcount(a)
++        u, v = a[0], a[1]
++        u == v
++        del u, v                                                          ######################¶¯Ì¬ÌØÐÔ del
++        gc.collect()
++        after = sys.getrefcount(a)
++        assert_equal(before, after)
+ 
+ if __name__ == "__main__":
+     run_module_suite()
