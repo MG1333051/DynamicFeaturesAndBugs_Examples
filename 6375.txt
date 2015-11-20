@@ -1,0 +1,225 @@
+From 876b58063ef73f6e430aced96a1e3320c1123c31 Mon Sep 17 00:00:00 2001
+From: Sebastian Berg <sebastian@sipsolutions.net>
+Date: Sun, 27 Sep 2015 17:27:29 +0200
+Subject: [PATCH 1/2] REV: Make sure ravel returns a contiguous array
+
+This is a bit more then it used to do, so it is not a complete
+revert. Some of the "weird" cases where a copy was unnecessarily
+done will now only be gone with RELAXED_STRIDES_CHECKING.
+---
+ numpy/core/src/multiarray/shape.c   | 36 +++++++++++-------------
+ numpy/core/tests/test_multiarray.py | 56 ++++++++++++++++++++++---------------
+ 2 files changed, 50 insertions(+), 42 deletions(-)
+
+diff --git a/numpy/core/src/multiarray/shape.c b/numpy/core/src/multiarray/shape.c
+index b679d6d..f46f820 100644
+--- a/numpy/core/src/multiarray/shape.c
++++ b/numpy/core/src/multiarray/shape.c
+@@ -940,55 +940,51 @@ PyArray_Ravel(PyArrayObject *arr, NPY_ORDER order)
+             order = NPY_FORTRANORDER;
+         }
+     }
++    else if (order == NPY_ANYORDER) {
++        order = PyArray_ISFORTRAN(arr) ? NPY_FORTRANORDER : NPY_CORDER;
++    }
+ 
+-    if (order != NPY_KEEPORDER) {
+-        return PyArray_Newshape(arr, &newdim, order);
++    if (order == NPY_CORDER && PyArray_IS_C_CONTIGUOUS(arr)) {
++        return PyArray_Newshape(arr, &newdim, NPY_CORDER);
++    }
++    else if (order == NPY_FORTRANORDER && PyArray_IS_F_CONTIGUOUS(arr)) {
++        return PyArray_Newshape(arr, &newdim, NPY_FORTRANORDER);
+     }
+     /* For KEEPORDER, check if we can make a flattened view */
+-    else {
++    else if (order == NPY_KEEPORDER) {
+         npy_stride_sort_item strideperm[NPY_MAXDIMS];
+-        npy_intp stride = 0, base_stride = NPY_MIN_INTP;
++        npy_intp stride;
+         int i, ndim = PyArray_NDIM(arr);
+ 
+         PyArray_CreateSortedStridePerm(PyArray_NDIM(arr),
+                                 PyArray_STRIDES(arr), strideperm);
+ 
++        /* The output array must be contiguous, so the first stride is fixed */
++        stride = PyArray_ITEMSIZE(arr);
++
+         for (i = ndim-1; i >= 0; --i) {
+             if (PyArray_DIM(arr, strideperm[i].perm) == 1) {
+                 /* A size one dimension does not matter */
+                 continue;
+             }
+-            if (base_stride == NPY_MIN_INTP) {
+-                stride = strideperm[i].stride;
+-                base_stride = stride;
+-            }
+-            else if (strideperm[i].stride != stride) {
++            if (strideperm[i].stride != stride) {
+                 break;
+             }
+             stride *= PyArray_DIM(arr, strideperm[i].perm);
+         }
+ 
+-#if NPY_RELAXED_STRIDES_CHECKING == 0
+-        /*
+-         * For tidyness, cannot be reached with relaxed strides checking
+-         * since the array is guaranteed contiguous (without, not sure...)
+-         */
+-        if (base_stride == NPY_MIN_INTP) {
+-            base_stride = PyArray_ITEMSIZE(arr);
+-        }
+-#endif
+-
+         /* If all the strides matched a contiguous layout, return a view */
+         if (i < 0) {
+             PyArrayObject *ret;
+ 
++            stride = PyArray_ITEMSIZE(arr);
+             val[0] = PyArray_SIZE(arr);
+ 
+             Py_INCREF(PyArray_DESCR(arr));
+             ret = (PyArrayObject *)PyArray_NewFromDescr(Py_TYPE(arr),
+                                PyArray_DESCR(arr),
+                                1, val,
+-                               &base_stride,
++                               &stride,
+                                PyArray_BYTES(arr),
+                                PyArray_FLAGS(arr),
+                                (PyObject *)arr);
+diff --git a/numpy/core/tests/test_multiarray.py b/numpy/core/tests/test_multiarray.py
+index 65c2e9f..cc0d054 100644
+--- a/numpy/core/tests/test_multiarray.py
++++ b/numpy/core/tests/test_multiarray.py
+@@ -2077,41 +2077,37 @@ def test_ravel(self):
+         assert_equal(a.ravel(order='K'), [2, 3, 0, 1])
+         assert_(a.ravel(order='K').flags.owndata)
+ 
++        # Test simple 1-d copy behaviour:
++        a = np.arange(10)[::2]
++        assert_(a.ravel('K').flags.owndata)
++        assert_(a.ravel('C').flags.owndata)
++        assert_(a.ravel('F').flags.owndata)
++
+         # Not contiguous and 1-sized axis with non matching stride
+         a = np.arange(2**3 * 2)[::2]
+         a = a.reshape(2, 1, 2, 2).swapaxes(-1, -2)
+         strides = list(a.strides)
+         strides[1] = 123
+         a.strides = strides
+-        assert_(np.may_share_memory(a.ravel(order='K'), a))
++        assert_(a.ravel(order='K').flags.owndata)
+         assert_equal(a.ravel('K'), np.arange(0, 15, 2))
+ 
+-        # General case of possible ravel that is not contiguous but
+-        # works and includes a 1-sized axis with non matching stride
+-        a = a.swapaxes(-1, -2)  # swap back to C-order
+-        assert_(np.may_share_memory(a.ravel(order='C'), a))
+-        assert_(np.may_share_memory(a.ravel(order='K'), a))
+-
+-        a = a.T  # swap all to Fortran order
+-        assert_(np.may_share_memory(a.ravel(order='F'), a))
++        # contiguous and 1-sized axis with non matching stride works:
++        a = np.arange(2**3)
++        a = a.reshape(2, 1, 2, 2).swapaxes(-1, -2)
++        strides = list(a.strides)
++        strides[1] = 123
++        a.strides = strides
+         assert_(np.may_share_memory(a.ravel(order='K'), a))
++        assert_equal(a.ravel(order='K'), np.arange(2**3))
+ 
+-        # Test negative strides:
++        # Test negative strides (not very interesting since non-contiguous):
+         a = np.arange(4)[::-1].reshape(2, 2)
+-        assert_(np.may_share_memory(a.ravel(order='C'), a))
+-        assert_(np.may_share_memory(a.ravel(order='K'), a))
++        assert_(a.ravel(order='C').flags.owndata)
++        assert_(a.ravel(order='K').flags.owndata)
+         assert_equal(a.ravel('C'), [3, 2, 1, 0])
+         assert_equal(a.ravel('K'), [3, 2, 1, 0])
+ 
+-        # Test keeporder with weirdly strided 1-sized dims (1-d first stride)
+-        a = np.arange(8)[::2].reshape(1, 2, 2, 1)  # neither C, nor F order
+-        strides = list(a.strides)
+-        strides[0] = -12
+-        strides[-1] = 0
+-        a.strides = strides
+-        assert_(np.may_share_memory(a.ravel(order='K'), a))
+-        assert_equal(a.ravel('K'), a.ravel('C'))
+-
+         # 1-element tidy strides test (NPY_RELAXED_STRIDES_CHECKING):
+         a = np.array([[1]])
+         a.strides = (123, 432)
+@@ -2127,7 +2123,7 @@ def test_ravel(self):
+             assert_equal(a.ravel(order), [0])
+             assert_(np.may_share_memory(a.ravel(order), a))
+ 
+-        #Test that certain non-inplace ravels work right (mostly) for 'K':
++        # Test that certain non-inplace ravels work right (mostly) for 'K':
+         b = np.arange(2**4 * 2)[::2].reshape(2, 2, 2, 2)
+         a = b[..., ::2]
+         assert_equal(a.ravel('K'), [0, 4, 8, 12, 16, 20, 24, 28])
+@@ -2141,6 +2137,22 @@ def test_ravel(self):
+         assert_equal(a.ravel('A'), [0, 2, 4, 6, 8, 10, 12, 14])
+         assert_equal(a.ravel('F'), [0, 8, 4, 12, 2, 10, 6, 14])
+ 
++    def test_ravel_subclass(self):
++        class ArraySubclass(np.ndarray):
++            pass
++
++        a = np.arange(10).view(ArraySubclass)
++        assert_(isinstance(a.ravel('C'), ArraySubclass))              #################### isinstance 动态特性
++        assert_(isinstance(a.ravel('F'), ArraySubclass))              #################### isinstance 动态特性
++        assert_(isinstance(a.ravel('A'), ArraySubclass))               #################### isinstance 动态特性
++        assert_(isinstance(a.ravel('K'), ArraySubclass))                #################### isinstance 动态特性
++
++        a = np.arange(10)[::2].view(ArraySubclass)
++        assert_(isinstance(a.ravel('C'), ArraySubclass))                  #################### isinstance 动态特性
++        assert_(isinstance(a.ravel('F'), ArraySubclass))                #################### isinstance 动态特性
++        assert_(isinstance(a.ravel('A'), ArraySubclass))               #################### isinstance 动态特性
++        assert_(isinstance(a.ravel('K'), ArraySubclass))               #################### isinstance 动态特性
++
+     def test_swapaxes(self):
+         a = np.arange(1*2*3*4).reshape(1, 2, 3, 4).copy()
+         idx = np.indices(a.shape)
+
+From 459f44a68a13a43882c92fa64590adc0f9c608c3 Mon Sep 17 00:00:00 2001
+From: Sebastian Berg <sebastian@sipsolutions.net>
+Date: Sun, 27 Sep 2015 18:08:04 +0200
+Subject: [PATCH 2/2] DOC: Document behaviour of ravel more clearly
+
+---
+ numpy/core/fromnumeric.py | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/numpy/core/fromnumeric.py b/numpy/core/fromnumeric.py
+index 10626fe..10f4a98 100644
+--- a/numpy/core/fromnumeric.py
++++ b/numpy/core/fromnumeric.py
+@@ -1371,7 +1371,7 @@ def trace(a, offset=0, axis1=0, axis2=1, dtype=None, out=None):
+ 
+ 
+ def ravel(a, order='C'):
+-    """Return a flattened array.
++    """Return a contiguous flattened array.
+ 
+     A 1-D array, containing the elements of the input, is returned.  A copy is
+     made only if needed.
+@@ -1415,6 +1415,7 @@ def ravel(a, order='C'):
+     ndarray.flat : 1-D iterator over an array.
+     ndarray.flatten : 1-D array copy of the elements of an array
+                       in row-major order.
++    ndarray.reshape : Change the shape of an array without changing its data.
+ 
+     Notes
+     -----
+@@ -1425,6 +1426,9 @@ def ravel(a, order='C'):
+     the index along the last quickest.  The opposite holds for
+     column-major, Fortran-style index ordering.
+ 
++    When a view is desired in as many cases as possible, ``arr.reshape(-1)``
++    may be preferable.
++
+     Examples
+     --------
+     It is equivalent to ``reshape(-1, order=order)``.
