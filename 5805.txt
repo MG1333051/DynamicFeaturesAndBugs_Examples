@@ -1,0 +1,167 @@
+From 2a8efb1850f9be15c5129369a127fb56dabf0fb3 Mon Sep 17 00:00:00 2001
+From: Jaime Fernandez <jaime.frio@gmail.com>
+Date: Mon, 27 Apr 2015 06:12:56 -0700
+Subject: [PATCH 1/3] BUG: make empty inputs to ix_ create an empty int typed
+ output
+
+Fixes #5804
+---
+ numpy/lib/index_tricks.py | 16 +++++++---------
+ 1 file changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/numpy/lib/index_tricks.py b/numpy/lib/index_tricks.py
+index e973381..2bb11bf 100644
+--- a/numpy/lib/index_tricks.py
++++ b/numpy/lib/index_tricks.py
+@@ -7,7 +7,7 @@
+ from numpy.core.numeric import (
+     asarray, ScalarType, array, alltrue, cumprod, arange
+     )
+-from numpy.core.numerictypes import find_common_type
++from numpy.core.numerictypes import find_common_type, issubdtype
+ 
+ from . import function_base
+ import numpy.matrixlib as matrix
+@@ -71,17 +71,15 @@ def ix_(*args):
+     """
+     out = []
+     nd = len(args)
+-    baseshape = [1]*nd
+-    for k in range(nd):
+-        new = _nx.asarray(args[k])
++    for k, new in enumerate(args):
++        # Explicitly type empty sequences to avoid float default
++        new = asarray(new, dtype=None if new else _nx.intp)
+         if (new.ndim != 1):
+             raise ValueError("Cross index must be 1 dimensional")
+-        if issubclass(new.dtype.type, _nx.bool_):                                ###################issubclass ¶¯Ì¬ÌØÐÔ
+-            new = new.nonzero()[0]
+-        baseshape[k] = len(new)
+-        new = new.reshape(tuple(baseshape))
++        if issubdtype(new.dtype, _nx.bool_):
++            new, = new.nonzero()
++        new.shape = (1,)*k + (new.size,) + (1,)*(nd-k-1)
+         out.append(new)
+-        baseshape[k] = 1
+     return tuple(out)
+ 
+ class nd_grid(object):
+
+From f06b1210d7171b4a452d0c9c67cde7b1a130303e Mon Sep 17 00:00:00 2001
+From: Jaime Fernandez <jaime.frio@gmail.com>
+Date: Mon, 27 Apr 2015 06:15:03 -0700
+Subject: [PATCH 2/3] TST: Added tests for ix_
+
+---
+ numpy/lib/tests/test_index_tricks.py | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/numpy/lib/tests/test_index_tricks.py b/numpy/lib/tests/test_index_tricks.py
+index 97047c5..fc3b909 100644
+--- a/numpy/lib/tests/test_index_tricks.py
++++ b/numpy/lib/tests/test_index_tricks.py
+@@ -7,7 +7,7 @@
+     )
+ from numpy.lib.index_tricks import (
+     mgrid, ndenumerate, fill_diagonal, diag_indices, diag_indices_from,
+-    index_exp, ndindex, r_, s_
++    index_exp, ndindex, r_, s_, ix_
+     )
+ 
+ 
+@@ -169,6 +169,30 @@ def test_simple_1(self):
+         assert_equal(a[:, :3, [1, 2]], a[s_[:, :3, [1, 2]]])
+ 
+ 
++class TestIx_(TestCase):
++    def test_regression_1(self):
++        # Empty inputs create ouputs of indexing type, gh-5804
++        a, = np.ix_(range(0, 0))
++        assert_equal(a.dtype, np.intp)
++
++    def test_shape_and_dtype(self):
++        sizes = (4, 5, 3, 2)
++        arrays = np.ix_(*[range(sz) for sz in sizes])
++        for k, (a, sz) in enumerate(zip(arrays, sizes)):
++            assert_equal(a.shape[k], sz)
++            assert_(all(sh == 1 for j, sh in enumerate(a.shape) if j != k))
++            assert_(np.issubdtype(a.dtype, int))
++
++    def test_bool(self):
++        bool_a = [True, False, True, True]
++        int_a, = np.nonzero(bool_a)
++        assert_equal(np.ix_(bool_a)[0], int_a)
++
++    def test_1d_only(self):
++        idx2d = [[1, 2, 3], [4, 5, 6]]
++        assert_raises(ValueError, np.ix_, idx2d)
++
++
+ def test_c_():
+     a = np.c_[np.array([[1, 2, 3]]), 0, 0, np.array([[4, 5, 6]])]
+     assert_equal(a, [[1, 2, 3, 0, 0, 4, 5, 6]])
+
+From c01165f43068fea96722c172eb23efed4ca99763 Mon Sep 17 00:00:00 2001
+From: Jaime Fernandez <jaime.frio@gmail.com>
+Date: Tue, 28 Apr 2015 22:42:50 -0700
+Subject: [PATCH 3/3] BUG: Fix handling of non-empty ndarrays
+
+---
+ numpy/lib/index_tricks.py            |  8 +++++---
+ numpy/lib/tests/test_index_tricks.py | 20 ++++++++++++--------
+ 2 files changed, 17 insertions(+), 11 deletions(-)
+
+diff --git a/numpy/lib/index_tricks.py b/numpy/lib/index_tricks.py
+index 2bb11bf..752407f 100644
+--- a/numpy/lib/index_tricks.py
++++ b/numpy/lib/index_tricks.py
+@@ -72,10 +72,12 @@ def ix_(*args):
+     out = []
+     nd = len(args)
+     for k, new in enumerate(args):
+-        # Explicitly type empty sequences to avoid float default
+-        new = asarray(new, dtype=None if new else _nx.intp)
+-        if (new.ndim != 1):
++        new = asarray(new)
++        if new.ndim != 1:
+             raise ValueError("Cross index must be 1 dimensional")
++        if new.size == 0:
++            # Explicitly type empty arrays to avoid float default
++            new = new.astype(_nx.intp)
+         if issubdtype(new.dtype, _nx.bool_):
+             new, = new.nonzero()
+         new.shape = (1,)*k + (new.size,) + (1,)*(nd-k-1)
+diff --git a/numpy/lib/tests/test_index_tricks.py b/numpy/lib/tests/test_index_tricks.py
+index fc3b909..0e3c98e 100644
+--- a/numpy/lib/tests/test_index_tricks.py
++++ b/numpy/lib/tests/test_index_tricks.py
+@@ -171,17 +171,21 @@ def test_simple_1(self):
+ 
+ class TestIx_(TestCase):
+     def test_regression_1(self):
+-        # Empty inputs create ouputs of indexing type, gh-5804
+-        a, = np.ix_(range(0, 0))
+-        assert_equal(a.dtype, np.intp)
++        # Test empty inputs create ouputs of indexing type, gh-5804
++        # Test both lists and arrays
++        for func in (range, np.arange):
++            a, = np.ix_(func(0))
++            assert_equal(a.dtype, np.intp)
+ 
+     def test_shape_and_dtype(self):
+         sizes = (4, 5, 3, 2)
+-        arrays = np.ix_(*[range(sz) for sz in sizes])
+-        for k, (a, sz) in enumerate(zip(arrays, sizes)):
+-            assert_equal(a.shape[k], sz)
+-            assert_(all(sh == 1 for j, sh in enumerate(a.shape) if j != k))
+-            assert_(np.issubdtype(a.dtype, int))
++        # Test both lists and arrays
++        for func in (range, np.arange):
++            arrays = np.ix_(*[func(sz) for sz in sizes])
++            for k, (a, sz) in enumerate(zip(arrays, sizes)):
++                assert_equal(a.shape[k], sz)
++                assert_(all(sh == 1 for j, sh in enumerate(a.shape) if j != k))
++                assert_(np.issubdtype(a.dtype, int))
+ 
+     def test_bool(self):
+         bool_a = [True, False, True, True]

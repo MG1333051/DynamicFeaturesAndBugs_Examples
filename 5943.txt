@@ -1,0 +1,375 @@
+From a93b86217e9ff8cc1060aaf362cd682b518cfb7b Mon Sep 17 00:00:00 2001
+From: Allan Haldane <allan.haldane@gmail.com>
+Date: Fri, 5 Jun 2015 12:10:25 -0400
+Subject: [PATCH] BUG: automatically convert recarray dtype to np.record
+
+Viewing an ndarray as a np.recarray now automatically converts
+the dtype to np.record.
+
+This commit also fixes assignment to MaskedArray's dtype attribute,
+fixes the repr of recarrays with non-structured dtype, and removes
+recarray.view so that viewing a recarray as a non-structured dtype
+no longer converts to ndarray type.
+
+Fixes #3581
+---
+ doc/release/1.10.0-notes.rst           |  7 ++++++
+ doc/source/reference/arrays.dtypes.rst | 18 +++++++-------
+ numpy/core/records.py                  | 44 ++++++++++++++--------------------
+ numpy/core/tests/test_records.py       | 39 +++++++++++++++++++++++++++++-
+ numpy/doc/structured_arrays.py         | 40 ++++++++++---------------------
+ numpy/ma/core.py                       | 30 +++++++++++++++--------
+ numpy/ma/tests/test_core.py            | 26 ++++++++++++++++++++
+ 7 files changed, 132 insertions(+), 72 deletions(-)
+
+diff --git a/doc/release/1.10.0-notes.rst b/doc/release/1.10.0-notes.rst
+index 2318e52..a7b15dd 100644
+--- a/doc/release/1.10.0-notes.rst
++++ b/doc/release/1.10.0-notes.rst
+@@ -85,6 +85,13 @@ Notably, this affect recarrays containing strings with whitespace, as trailing
+ whitespace is trimmed from chararrays but kept in ndarrays of string type.
+ Also, the dtype.type of nested structured fields is now inherited.
+ 
++recarray views
++~~~~~~~~~~~~~~
++Viewing an ndarray as a recarray now automatically converts the dtype to
++np.record. See new record array documentation. Additionally, viewing a recarray
++with a non-structured dtype no longer converts the result's type to ndarray -
++the result will remain a recarray.
++
+ 'out' keyword argument of ufuncs now accepts tuples of arrays
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ When using the 'out' keyword argument of a ufunc, a tuple of arrays, one per
+diff --git a/doc/source/reference/arrays.dtypes.rst b/doc/source/reference/arrays.dtypes.rst
+index 28e2d4f..8f14118 100644
+--- a/doc/source/reference/arrays.dtypes.rst
++++ b/doc/source/reference/arrays.dtypes.rst
+@@ -424,16 +424,18 @@ Type strings
+ 
+ ``(base_dtype, new_dtype)``
+ 
+-    This usage is discouraged. In NumPy 1.7 and later, it is possible
+-    to specify struct dtypes with overlapping fields, functioning like
+-    the 'union' type in C. The union mechanism is preferred.
+-
+-    Both arguments must be convertible to data-type objects in this
+-    case. The *base_dtype* is the data-type object that the new
+-    data-type builds on. This is how you could assign named fields to
+-    any built-in data-type object, as done in
++    In NumPy 1.7 and later, this form allows `base_dtype` to be interpreted as
++    a structured dtype. Arrays created with this dtype will have underlying
++    dtype `base_dtype` but will have fields and flags taken from `new_dtype`.
++    This is useful for creating custom structured dtypes, as done in
+     :ref:`record arrays <arrays.classes.rec>`.
+ 
++    This form also makes it possible to specify struct dtypes with overlapping
++    fields, functioning like the 'union' type in C. This usage is discouraged,
++    however, and the union mechanism is preferred.
++
++    Both arguments must be convertible to data-type objects with the same total
++    size.
+     .. admonition:: Example
+ 
+        32-bit integer, whose first two bytes are interpreted as an integer
+diff --git a/numpy/core/records.py b/numpy/core/records.py
+index b1ea176..1b3d75d 100644
+--- a/numpy/core/records.py
++++ b/numpy/core/records.py
+@@ -423,6 +423,12 @@ def __new__(subtype, shape, dtype=None, buf=None, offset=0, strides=None,
+                                       strides=strides, order=order)
+         return self
+ 
++    def __array_finalize__(self, obj):
++        if self.dtype.type is not record:
++            # if self.dtype is not np.record, invoke __setattr__ which will 
++            # convert it to a record if it is a void dtype.
++            self.dtype = self.dtype
++
+     def __getattribute__(self, attr):
+         # See if ndarray has this attr, and return it if so. (note that this
+         # means a field with the same name as an ndarray attr cannot be
+@@ -456,6 +462,11 @@ def __getattribute__(self, attr):
+     # Undo any "setting" of the attribute and do a setfield
+     # Thus, you can't create attributes on-the-fly that are field names.
+     def __setattr__(self, attr, val):
++
++        # Automatically convert (void) dtypes to records.
++        if attr == 'dtype' and issubclass(val.type, nt.void):                                     ################动态特性 issubclass
++            val = sb.dtype((record, val))
++
+         newattr = attr not in self.__dict__
+         try:
+             ret = object.__setattr__(self, attr, val)
+@@ -502,8 +513,10 @@ def __repr__(self):
+             # show zero-length shape unless it is (0,)
+             lst = "[], shape=%s" % (repr(self.shape),)
+ 
+-        if self.dtype.type is record:
++        if (self.dtype.type is record
++                or (not issubclass(self.dtype.type, nt.void)) ):                                  ####################动态特性 issubclass
+             # If this is a full record array (has numpy.record dtype),
++            # or if it has a scalar (non-void) dtype with no records,
+             # represent it using the rec.array function. Since rec.array
+             # converts dtype to a numpy.record for us, use only dtype.descr,
+             # not repr(dtype).
+@@ -512,7 +525,8 @@ def __repr__(self):
+                           (lst, lf, repr(self.dtype.descr)))
+         else:
+             # otherwise represent it using np.array plus a view
+-            # (There is currently (v1.10) no other easy way to create it)
++            # This should only happen if the user is playing
++            # strange games with dtypes.
+             lf = '\n'+' '*len("array(")
+             return ('array(%s, %sdtype=%s).view(numpy.recarray)' %
+                           (lst, lf, str(self.dtype)))
+@@ -534,22 +548,6 @@ def field(self, attr, val=None):
+         else:
+             return self.setfield(val, *res)
+ 
+-    def view(self, dtype=None, type=None):
+-        if dtype is None:
+-            return ndarray.view(self, type)
+-        elif type is None:
+-            try:
+-                if issubclass(dtype, ndarray):                                                                    ################动态特性 issubclass
+-                    return ndarray.view(self, dtype)
+-            except TypeError:
+-                pass
+-            dtype = sb.dtype(dtype)
+-            if dtype.fields is None:
+-                return self.__array__().view(dtype)
+-            return ndarray.view(self, dtype)
+-        else:
+-            return ndarray.view(self, dtype, type)
+-
+ 
+ def fromarrays(arrayList, dtype=None, shape=None, formats=None,
+                names=None, titles=None, aligned=False, byteorder=None):
+@@ -837,10 +835,7 @@ def array(obj, dtype=None, shape=None, offset=0, strides=None, formats=None,
+             new = obj
+         if copy:
+             new = new.copy()
+-        res = new.view(recarray)
+-        if issubclass(res.dtype.type, nt.void):                                                                   ################动态特性 issubclass
+-            res.dtype = sb.dtype((record, res.dtype))
+-        return res
++        return new.view(recarray)
+ 
+     else:
+         interface = getattr(obj, "__array_interface__", None)
+@@ -849,7 +844,4 @@ def array(obj, dtype=None, shape=None, offset=0, strides=None, formats=None,
+         obj = sb.array(obj)
+         if dtype is not None and (obj.dtype != dtype):
+             obj = obj.view(dtype)
+-        res = obj.view(recarray)
+-        if issubclass(res.dtype.type, nt.void):                                                             ################动态特性 issubclass
+-            res.dtype = sb.dtype((record, res.dtype))
+-        return res
++        return obj.view(recarray)
+diff --git a/numpy/core/tests/test_records.py b/numpy/core/tests/test_records.py
+index 4924d44..44625ad 100644
+--- a/numpy/core/tests/test_records.py
++++ b/numpy/core/tests/test_records.py
+@@ -88,13 +88,50 @@ def test_recarray_from_repr(self):
+         assert_equal(recordarr, recordarr_r)
+ 
+         assert_equal(type(recarr_r), np.recarray)
+-        assert_equal(recarr_r.dtype.type, np.void)
++        assert_equal(recarr_r.dtype.type, np.record)
+         assert_equal(recarr, recarr_r)
+ 
+         assert_equal(type(recordview_r), np.ndarray)
+         assert_equal(recordview.dtype.type, np.record)
+         assert_equal(recordview, recordview_r)
+ 
++    def test_recarray_views(self):
++        a = np.array([(1,'ABC'), (2, "DEF")],
++                     dtype=[('foo', int), ('bar', 'S4')])
++        b = np.array([1,2,3,4,5], dtype=np.int64)
++
++        #check that np.rec.array gives right dtypes
++        assert_equal(np.rec.array(a).dtype.type, np.record)
++        assert_equal(type(np.rec.array(a)), np.recarray)
++        assert_equal(np.rec.array(b).dtype.type, np.int64)
++        assert_equal(type(np.rec.array(b)), np.recarray)
++
++        #check that viewing as recarray does the same
++        assert_equal(a.view(np.recarray).dtype.type, np.record)
++        assert_equal(type(a.view(np.recarray)), np.recarray)
++        assert_equal(b.view(np.recarray).dtype.type, np.int64)
++        assert_equal(type(b.view(np.recarray)), np.recarray)
++
++        #check that view to non-structured dtype preserves type=np.recarray
++        r = np.rec.array(np.ones(4, dtype="f4,i4"))
++        rv = r.view('f8').view('f4,i4')
++        assert_equal(type(rv), np.recarray)
++        assert_equal(rv.dtype.type, np.record)
++
++        #check that we can undo the view
++        arrs = [np.ones(4, dtype='f4,i4'), np.ones(4, dtype='f8')]
++        for arr in arrs:
++            rec = np.rec.array(arr)
++            # recommended way to view as an ndarray:
++            arr2 = rec.view(rec.dtype.fields or rec.dtype, np.ndarray)
++            assert_equal(arr2.dtype.type, arr.dtype.type)
++            assert_equal(type(arr2), type(arr))
++
++    def test_recarray_repr(self):
++        # make sure non-structured dtypes also show up as rec.array
++        a = np.array(np.ones(4, dtype='f8'))
++        assert_(repr(np.rec.array(a)).startswith('rec.array'))
++
+     def test_recarray_from_names(self):
+         ra = np.rec.array([
+             (1, 'abc', 3.7000002861022949, 0),
+diff --git a/numpy/doc/structured_arrays.py b/numpy/doc/structured_arrays.py
+index 73bf3b3..fe17c13 100644
+--- a/numpy/doc/structured_arrays.py
++++ b/numpy/doc/structured_arrays.py
+@@ -258,6 +258,19 @@
+  >>> recordarr = arr.view(dtype=dtype((np.record, arr.dtype)), 
+  ...                      type=np.recarray)
+ 
++For convenience, viewing an ndarray as type `np.recarray` will automatically
++convert to `np.record` datatype, so the dtype can be left out of the view: ::
++
++ >>> recordarr = arr.view(np.recarray)
++ >>> recordarr.dtype
++ dtype((numpy.record, [('foo', '<i4'), ('bar', '<f4'), ('baz', 'S10')]))
++
++To get back to a plain ndarray both the dtype and type must be reset. The
++following view does so, taking into account the unusual case that the
++recordarr was not a structured type: ::
++
++ >>> arr2 = recordarr.view(recordarr.dtype.fields or recordarr.dtype, np.ndarray)
++
+ Record array fields accessed by index or by attribute are returned as a record
+ array if the field has a structured type but as a plain ndarray otherwise. ::
+ 
+@@ -272,33 +285,6 @@
+ attribute takes precedence. Such fields will be inaccessible by attribute but
+ may still be accessed by index.
+ 
+-Partial Attribute Access
+-------------------------
+-
+-The differences between record arrays and plain structured arrays induce a
+-small performance penalty. It is possible to apply one or the other view
+-independently if desired. To allow field access by attribute only on the array
+-object it is sufficient to view an array as a recarray: ::
+-
+- >>> recarr = arr.view(np.recarray)
+-
+-This type of view is commonly used, for example in np.npyio and
+-np.recfunctions. Note that unlike full record arrays the individual elements of
+-such a view do not have field attributes::
+-
+- >>> recarr[0].foo
+- AttributeError: 'numpy.void' object has no attribute 'foo'
+-
+-To use the np.record dtype only, convert the dtype using the (base_class,
+-dtype) form described in numpy.dtype.  This type of view is rarely used. ::
+-
+- >>> arr_records = arr.view(dtype((np.record, arr.dtype)))
+-
+-In documentation, the term 'structured array' will refer to objects of type
+-np.ndarray with structured dtype, 'record array' will refer to structured
+-arrays subclassed as np.recarray and whose dtype is of type np.record, and
+-'recarray' will refer to arrays subclassed as np.recarray but whose dtype is
+-not of type np.record.
+ 
+ """
+ from __future__ import division, absolute_import, print_function
+diff --git a/numpy/ma/core.py b/numpy/ma/core.py
+index 703580d..c47bcc0 100644
+--- a/numpy/ma/core.py
++++ b/numpy/ma/core.py
+@@ -2966,17 +2966,13 @@ def view(self, dtype=None, type=None, fill_value=None):
+                 output = ndarray.view(self, dtype)
+         else:
+             output = ndarray.view(self, dtype, type)
+-        # Should we update the mask ?
++
++        # also make the mask be a view (so attr changes to the view's
++        # mask do no affect original object's mask)
++        # (especially important to avoid affecting np.masked singleton)
+         if (getattr(output, '_mask', nomask) is not nomask):
+-            if dtype is None:
+-                dtype = output.dtype
+-            mdtype = make_mask_descr(dtype)
+-            output._mask = self._mask.view(mdtype, ndarray)
+-            # Try to reset the shape of the mask (if we don't have a void)
+-            try:
+-                output._mask.shape = output.shape
+-            except (AttributeError, TypeError):
+-                pass
++            output._mask = output._mask.view()
++
+         # Make sure to reset the _fill_value if needed
+         if getattr(output, '_fill_value', None) is not None:
+             if fill_value is None:
+@@ -3157,6 +3153,17 @@ def __setitem__(self, indx, value):
+             _mask[indx] = mindx
+         return
+ 
++    def __setattr__(self, attr, value):
++        super(MaskedArray, self).__setattr__(attr, value)
++        if attr == 'dtype' and self._mask is not nomask:
++            self._mask = self._mask.view(make_mask_descr(value), ndarray)
++
++            # Try to reset the shape of the mask (if we don't have a void)
++            # This raises a ValueError if the dtype change won't work
++            try:
++                self._mask.shape = self.shape
++            except (AttributeError, TypeError):
++                pass
+ 
+     def __getslice__(self, i, j):
+         """x.__getslice__(i, j) <==> x[i:j]
+@@ -4906,6 +4913,9 @@ def anom(self, axis=None, dtype=None):
+ 
+         """
+         m = self.mean(axis, dtype)
++        if m is masked:
++            return m
++
+         if not axis:
+             return (self - m)
+         else:
+diff --git a/numpy/ma/tests/test_core.py b/numpy/ma/tests/test_core.py
+index 2bf7827..ce6cdda 100644
+--- a/numpy/ma/tests/test_core.py
++++ b/numpy/ma/tests/test_core.py
+@@ -1401,6 +1401,32 @@ def test_flat(self):
+         assert_equal(b01.data, array([[1., 0.]]))
+         assert_equal(b01.mask, array([[False, False]]))
+ 
++    def test_assign_dtype(self):
++        # check that the mask's dtype is updated when dtype is changed
++        a = np.zeros(4, dtype='f4,i4')
++
++        m = np.ma.array(a)
++        m.dtype = np.dtype('f4')
++        repr(m) # raises?
++        assert_equal(m.dtype, np.dtype('f4'))
++
++        # check that dtype changes that change shape of mask too much
++        # are not allowed
++        def assign():
++            m = np.ma.array(a)
++            m.dtype = np.dtype('f8')
++        assert_raises(ValueError, assign)
++
++        b = a.view(dtype='f4', type=np.ma.MaskedArray) # raises?
++        assert_equal(b.dtype, np.dtype('f4'))
++
++        # check that nomask is preserved
++        a = np.zeros(4, dtype='f4')
++        m = np.ma.array(a)
++        m.dtype = np.dtype('f4,i4')
++        assert_equal(m.dtype, np.dtype('f4,i4'))
++        assert_equal(m._mask, np.ma.nomask)
++
+ 
+ #------------------------------------------------------------------------------
+ class TestFillingValues(TestCase):

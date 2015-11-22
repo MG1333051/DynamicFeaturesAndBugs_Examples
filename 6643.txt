@@ -1,0 +1,45 @@
+From c06726daa4d57893bc6132c3f311bd14ec6dc110 Mon Sep 17 00:00:00 2001
+From: Allan Haldane <allan.haldane@gmail.com>
+Date: Fri, 6 Nov 2015 12:32:39 -0500
+Subject: [PATCH] ENH: make recarray.getitem return a recarray
+
+recarray.__getitem__ should return a recarray when the returned value
+had structured type (it's documented to do so).
+
+Fixes #6641
+---
+ numpy/core/records.py            | 1 +
+ numpy/core/tests/test_records.py | 8 ++++++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/numpy/core/records.py b/numpy/core/records.py
+index 4ce3fe9..b077553 100644
+--- a/numpy/core/records.py
++++ b/numpy/core/records.py
+@@ -502,6 +502,7 @@ def __getitem__(self, indx):
+         # we might also be returning a single element
+         if isinstance(obj, ndarray):
+             if obj.dtype.fields:
++                obj = obj.view(recarray)
+                 if issubclass(obj.dtype.type, nt.void):
+                     return obj.view(dtype=(self.dtype.type, obj.dtype))
+                 return obj
+diff --git a/numpy/core/tests/test_records.py b/numpy/core/tests/test_records.py
+index 290bc4f..e0f0a3a 100644
+--- a/numpy/core/tests/test_records.py
++++ b/numpy/core/tests/test_records.py
+@@ -121,6 +121,14 @@ def test_recarray_views(self):
+         assert_equal(type(rv), np.recarray)
+         assert_equal(rv.dtype.type, np.record)
+ 
++        #check that getitem also preserves np.recarray and np.record
++        r = np.rec.array(np.ones(4, dtype=[('a', 'i4'), ('b', 'i4'), 
++                                           ('c', 'i4,i4')]))
++        assert_equal(r['c'].dtype.type, np.record)
++        assert_equal(type(r['c']), np.recarray)                               ###################type动态特性
++        assert_equal(r[['a', 'b']].dtype.type, np.record)
++        assert_equal(type(r[['a', 'b']]), np.recarray)                            ###################type动态特性
++
+         # check that accessing nested structures keep record type, but
+         # not for subarrays, non-void structures, non-structured voids
+         test_dtype = [('a', 'f4,f4'), ('b', 'V8'), ('c', ('f4',2)),

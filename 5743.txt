@@ -1,0 +1,142 @@
+From 61a546d4d9fa2ade218162fb3b048681cc83190c Mon Sep 17 00:00:00 2001
+From: jmrosen155 <Jordan@Jordans-MacBook-Pro.local>
+Date: Sat, 27 Sep 2014 13:56:07 -0400
+Subject: [PATCH 1/3] BUG: Integer list passed into nan_to_num results in
+ ValueError.
+
+Fix is to properly set array type.
+
+Closes #1478
+---
+ numpy/lib/type_check.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/numpy/lib/type_check.py b/numpy/lib/type_check.py
+index a45d0bd..da14515 100644
+--- a/numpy/lib/type_check.py
++++ b/numpy/lib/type_check.py
+@@ -365,6 +365,7 @@ def nan_to_num(x):
+             y = x.copy()
+         except AttributeError:
+             y = array(x)
++            t = y.dtype.type
+     if not issubclass(t, _nx.integer):
+         if not y.shape:
+             y = array([x])
+
+From 71dea15af12ca296cb0f360f09bbedd7c5edfd15 Mon Sep 17 00:00:00 2001
+From: Charles Harris <charlesr.harris@gmail.com>
+Date: Fri, 3 Apr 2015 11:30:35 -0600
+Subject: [PATCH 2/3] TST: Test nan_to_num with integer list input.
+
+---
+ numpy/lib/tests/test_type_check.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/numpy/lib/tests/test_type_check.py b/numpy/lib/tests/test_type_check.py
+index 3931f95..7afd120 100644
+--- a/numpy/lib/tests/test_type_check.py
++++ b/numpy/lib/tests/test_type_check.py
+@@ -277,6 +277,8 @@ def test_generic(self):
+     def test_integer(self):
+         vals = nan_to_num(1)
+         assert_all(vals == 1)
++        vals = nan_to_num([1])
++        assert_array_equal(vals, np.array([1], np.int))
+ 
+     def test_complex_good(self):
+         vals = nan_to_num(1+1j)
+
+From acbd6a9d4be019629414ec5f9a91c02bce7dec14 Mon Sep 17 00:00:00 2001
+From: Charles Harris <charlesr.harris@gmail.com>
+Date: Fri, 3 Apr 2015 12:46:06 -0600
+Subject: [PATCH 3/3] BUG: Refactor nan_to_num and make list inputs work in
+ Python > 3.2.
+
+Also fix the documentation to reflect current behavior
+
+1) Copies of the input are always returned.
+2) Type is preserved, in particular, integer is not upcast to float.
+
+Note that the function now accepts all types, not just inexact and
+integer. The lack of upcast is present since at least numpy 1.5, but
+may be a bug.
+---
+ numpy/lib/type_check.py | 57 ++++++++++++++++++++-----------------------------
+ 1 file changed, 23 insertions(+), 34 deletions(-)
+
+diff --git a/numpy/lib/type_check.py b/numpy/lib/type_check.py
+index da14515..99677b3 100644
+--- a/numpy/lib/type_check.py
++++ b/numpy/lib/type_check.py
+@@ -324,12 +324,13 @@ def nan_to_num(x):
+ 
+     Returns
+     -------
+-    out : ndarray, float
+-        Array with the same shape as `x` and dtype of the element in `x`  with
+-        the greatest precision. NaN is replaced by zero, and infinity
+-        (-infinity) is replaced by the largest (smallest or most negative)
+-        floating point value that fits in the output dtype. All finite numbers
+-        are upcast to the output dtype (default float64).
++    out : ndarray
++        New Array with the same shape as `x` and dtype of the element in
++        `x`  with the greatest precision. If `x` is inexact, then NaN is
++        replaced by zero, and infinity (-infinity) is replaced by the
++        largest (smallest or most negative) floating point value that fits
++        in the output dtype. If `x` is not inexact, then a copy of `x` is
++        returned.
+ 
+     See Also
+     --------
+@@ -354,34 +355,22 @@ def nan_to_num(x):
+             -1.28000000e+002,   1.28000000e+002])
+ 
+     """
+-    try:
+-        t = x.dtype.type
+-    except AttributeError:
+-        t = obj2sctype(type(x))
+-    if issubclass(t, _nx.complexfloating):                             ###################动态特性 issubclass
+-        return nan_to_num(x.real) + 1j * nan_to_num(x.imag)
+-    else:
+-        try:
+-            y = x.copy()
+-        except AttributeError:
+-            y = array(x)
+-            t = y.dtype.type
+-    if not issubclass(t, _nx.integer):                                  ###################动态特性 issubclass
+-        if not y.shape:
+-            y = array([x])
+-            scalar = True
+-        else:
+-            scalar = False
+-        are_inf = isposinf(y)
+-        are_neg_inf = isneginf(y)
+-        are_nan = isnan(y)
+-        maxf, minf = _getmaxmin(y.dtype.type)
+-        y[are_nan] = 0
+-        y[are_inf] = maxf
+-        y[are_neg_inf] = minf
+-        if scalar:
+-            y = y[0]
+-    return y
++    x = _nx.array(x, subok=True)
++    xtype = x.dtype.type
++    if not issubclass(xtype, _nx.inexact):                                      ###################动态特性 issubclass
++        return x
++
++    iscomplex = issubclass(xtype, _nx.complexfloating)
++    isscalar = (x.ndim == 0)
++
++    x = x[None] if isscalar else x
++    dest = (x.real, x.imag) if iscomplex else (x,)
++    maxf, minf = _getmaxmin(x.real.dtype)
++    for d in dest:
++        _nx.copyto(d, 0.0, where=isnan(d))
++        _nx.copyto(d, maxf, where=isposinf(d))
++        _nx.copyto(d, minf, where=isneginf(d))
++    return x[0] if isscalar else x
+ 
+ #-----------------------------------------------------------------------------
+ 

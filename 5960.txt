@@ -1,0 +1,96 @@
+From 7c8c3969403e84b6ac8f0cb800a66a542c3bf26c Mon Sep 17 00:00:00 2001
+From: Allan Haldane <allan.haldane@gmail.com>
+Date: Fri, 12 Jun 2015 00:20:33 -0400
+Subject: [PATCH] BUG: segfault in array_richcompare
+
+Fixes #4855.
+---
+ numpy/core/src/multiarray/arrayobject.c | 26 +++++++++++++++++++-------
+ numpy/core/tests/test_ufunc.py          | 13 +++++++++++++
+ 2 files changed, 32 insertions(+), 7 deletions(-)
+
+diff --git a/numpy/core/src/multiarray/arrayobject.c b/numpy/core/src/multiarray/arrayobject.c
+index 1a5c308..ced2471 100644
+--- a/numpy/core/src/multiarray/arrayobject.c
++++ b/numpy/core/src/multiarray/arrayobject.c
+@@ -1358,18 +1358,24 @@ array_richcompare(PyArrayObject *self, PyObject *other, int cmp_op)
+             _res = PyArray_CanCastTypeTo(PyArray_DESCR(self),
+                                          PyArray_DESCR(array_other),
+                                          NPY_EQUIV_CASTING);
+-            if (_res == 0) {
++
++            if (result == NULL) {
++                PyErr_Clear();
++            }
++            else {
+                 Py_DECREF(result);
++            }
++
++            if (_res == 0) {
+                 Py_DECREF(array_other);
+                 Py_INCREF(Py_False);
+                 return Py_False;
+             }
+             else {
+-                Py_DECREF(result);
+                 result = _void_compare(self, array_other, cmp_op);
++                Py_DECREF(array_other);
++                return result;
+             }
+-            Py_DECREF(array_other);
+-            return result;
+         }
+         /*
+          * If the comparison results in NULL, then the
+@@ -1433,18 +1439,24 @@ array_richcompare(PyArrayObject *self, PyObject *other, int cmp_op)
+             _res = PyArray_CanCastTypeTo(PyArray_DESCR(self),
+                                          PyArray_DESCR(array_other),
+                                          NPY_EQUIV_CASTING);
+-            if (_res == 0) {
++
++            if (result == NULL) {
++                PyErr_Clear();
++            }
++            else {
+                 Py_DECREF(result);
++            }
++
++            if (_res == 0) {
+                 Py_DECREF(array_other);
+                 Py_INCREF(Py_True);
+                 return Py_True;
+             }
+             else {
+-                Py_DECREF(result);
+                 result = _void_compare(self, array_other, cmp_op);
+                 Py_DECREF(array_other);
++                return result;
+             }
+-            return result;
+         }
+ 
+         if (result == NULL) {
+diff --git a/numpy/core/tests/test_ufunc.py b/numpy/core/tests/test_ufunc.py
+index 699a1b2..b18fce7 100644
+--- a/numpy/core/tests/test_ufunc.py
++++ b/numpy/core/tests/test_ufunc.py
+@@ -1156,6 +1156,19 @@ def test_reduce_arguments(self):
+                       out=None, invalid=0)
+         assert_raises(TypeError, f, d, axis=0, dtype=None, invalid=0)
+ 
++    def test_structured_equal(self):
++        # https://github.com/numpy/numpy/issues/4855
++        class MyA(np.ndarray):
++            def __numpy_ufunc__(self, ufunc, method, i, inputs, **kwargs):
++                return getattr(ufunc, method)(*(input.view(np.ndarray)                  ###########################动态特性 getattr
++                                              for input in inputs), **kwargs)
++        a = np.arange(12.).reshape(4,3)
++        ra = a.view(dtype=('f8,f8,f8')).squeeze()
++        mra = ra.view(MyA)
++
++        target = np.array([ True, False, False, False], dtype=bool)
++        assert_equal(np.all(target == (mra == ra[0])), True)
++
+ 
+ if __name__ == "__main__":
+     run_module_suite()

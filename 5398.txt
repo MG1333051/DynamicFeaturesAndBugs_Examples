@@ -1,0 +1,195 @@
+From 78f69df28acd80654705a43bcf1e977b9c423b53 Mon Sep 17 00:00:00 2001
+From: Garrett-R <garrettreynolds5@gmail.com>
+Date: Tue, 16 Dec 2014 22:50:26 -0800
+Subject: [PATCH] BUG: Fixes #5376: np.ravel to return same array type
+
+In PR #5358, np.diagonal was modified to return whatever array type it took in.
+Also, np.cumsum and np.clip return the same array type. So, np.ravel's behavior is surprising.
+Two tests which were expecting np.ravel to return an array have been changed.
+Also, the optional `order` parameter was added to MaskedArray.ravel to make it compatible
+(matrix.ravel already had this parameter).
+---
+ doc/release/1.10.0-notes.rst            | 13 ++++++++-----
+ numpy/core/arrayprint.py                |  3 ++-
+ numpy/core/fromnumeric.py               | 11 ++++++++---
+ numpy/ma/core.py                        | 22 +++++++++++++++++++---
+ numpy/ma/tests/test_core.py             |  3 +++
+ numpy/matrixlib/tests/test_defmatrix.py | 18 +++++++++++-------
+ 6 files changed, 51 insertions(+), 19 deletions(-)
+
+diff --git a/doc/release/1.10.0-notes.rst b/doc/release/1.10.0-notes.rst
+index be5e475..e115646 100644
+--- a/doc/release/1.10.0-notes.rst
++++ b/doc/release/1.10.0-notes.rst
+@@ -39,11 +39,14 @@ relaxed stride checking
+ ~~~~~~~~~~~~~~~~~~~~~~~
+ NPY_RELAXED_STRIDE_CHECKING is now true by default.
+ 
+-diag and diagonal
+-~~~~~~~~~~~~~~~~~
+-Both diag and diagonal now preserve subtypes. This will change the
+-dimensions of the returned diagonal in the case of matrices and that
+-may lead to problems in using the result.
++*np.ravel*, *np.diagonal* and *np.diag* now preserve subtypes
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++There was inconsistent behavior between *x.ravel()* and *np.ravel(x)*, as well
++as between *x.diagonal()* and *np.diagonal(x)*.  For example, if *x* was a
++matrix, then *x.ravel()* returned a matrix, while *np.ravel(x)* returned an
++ndarray.  In the case of matrices, the returned value will have different
++dimensions and that may lead to problems in using the result.
++
+ 
+ New Features
+ ============
+diff --git a/numpy/core/arrayprint.py b/numpy/core/arrayprint.py
+index db491e6..125d576 100644
+--- a/numpy/core/arrayprint.py
++++ b/numpy/core/arrayprint.py
+@@ -21,6 +21,7 @@
+ from .umath import maximum, minimum, absolute, not_equal, isnan, isinf
+ from .multiarray import format_longfloat, datetime_as_string, datetime_data
+ from .fromnumeric import ravel
++from .numeric import asarray
+ 
+ if sys.version_info[0] >= 3:
+     _MAXINT = sys.maxsize
+@@ -250,7 +251,7 @@ def _array2string(a, max_line_width, precision, suppress_small, separator=' ',
+         data = _leading_trailing(a)
+     else:
+         summary_insert = ""
+-        data = ravel(a)
++        data = ravel(asarray(a))
+ 
+     formatdict = {'bool' : _boolFormatter,
+                   'int' : IntegerFormat(data),
+diff --git a/numpy/core/fromnumeric.py b/numpy/core/fromnumeric.py
+index 321deb0..2dc270a 100644
+--- a/numpy/core/fromnumeric.py
++++ b/numpy/core/fromnumeric.py
+@@ -1340,6 +1340,10 @@ def ravel(a, order='C'):
+     A 1-D array, containing the elements of the input, is returned.  A copy is
+     made only if needed.
+ 
++    As of NumPy 1.10, the returned array will have the same type as the input
++    array. (for example, a masked array will be returned for a masked array
++    input)
++
+     Parameters
+     ----------
+     a : array_like
+@@ -1361,8 +1365,9 @@ def ravel(a, order='C'):
+ 
+     Returns
+     -------
+-    1d_array : ndarray
+-        Output of the same dtype as `a`, and of shape ``(a.size,)``.
++    y : array_like
++        Array of the same type as `a`, and of shape ``(a.size,)``
++        or ``(1, a.size)`` for matrices.
+ 
+     See Also
+     --------
+@@ -1420,7 +1425,7 @@ def ravel(a, order='C'):
+     array([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11])
+ 
+     """
+-    return asarray(a).ravel(order)
++    return asanyarray(a).ravel(order)
+ 
+ 
+ def nonzero(a):
+diff --git a/numpy/ma/core.py b/numpy/ma/core.py
+index 9ca9136..bbaaaa3 100644
+--- a/numpy/ma/core.py
++++ b/numpy/ma/core.py
+@@ -4041,10 +4041,26 @@ def count(self, axis=None):
+     #............................................
+     flatten = _arraymethod('flatten')
+     #
+-    def ravel(self):
++    def ravel(self, order='C'):
+         """
+         Returns a 1D version of self, as a view.
+ 
++        Parameters
++        ----------
++        order : {'C', 'F', 'A', 'K'}, optional
++            The elements of `a` are read using this index order. 'C' means to
++            index the elements in C-like order, with the last axis index
++            changing fastest, back to the first axis index changing slowest.
++            'F' means to index the elements in Fortran-like index order, with
++            the first index changing fastest, and the last index changing
++            slowest. Note that the 'C' and 'F' options take no account of the
++            memory layout of the underlying array, and only refer to the order
++            of axis indexing.  'A' means to read the elements in Fortran-like
++            index order if `m` is Fortran *contiguous* in memory, C-like order
++            otherwise.  'K' means to read the elements in the order they occur
++            in memory, except for reversing the data when strides are negative.
++            By default, 'C' index order is used.
++
+         Returns
+         -------
+         MaskedArray
+@@ -4062,10 +4078,10 @@ def ravel(self):
+         [1 -- 3 -- 5 -- 7 -- 9]
+ 
+         """
+-        r = ndarray.ravel(self._data).view(type(self)) 　　　　　　　　          ######################动态特性type
++        r = ndarray.ravel(self._data, order=order).view(type(self))              ######################动态特性type
+         r._update_from(self)
+         if self._mask is not nomask:
+-            r._mask = ndarray.ravel(self._mask).reshape(r.shape)
++            r._mask = ndarray.ravel(self._mask, order=order).reshape(r.shape)
+         else:
+             r._mask = nomask
+         return r
+diff --git a/numpy/ma/tests/test_core.py b/numpy/ma/tests/test_core.py
+index 4ac3465..a2ecccb 100644
+--- a/numpy/ma/tests/test_core.py
++++ b/numpy/ma/tests/test_core.py
+@@ -2325,6 +2325,9 @@ def test_ravel(self):
+         assert_equal(ar._mask, [0, 0, 0, 0])
+         assert_equal(ar._data, [1, 2, 3, 4])
+         assert_equal(ar.fill_value, -99)
++        # Test index ordering
++        assert_equal(a.ravel(order='C'), [1, 2, 3, 4])
++        assert_equal(a.ravel(order='F'), [1, 3, 2, 4])
+ 
+     def test_reshape(self):
+         # Tests reshape
+diff --git a/numpy/matrixlib/tests/test_defmatrix.py b/numpy/matrixlib/tests/test_defmatrix.py
+index d2a89bd..93843c5 100644
+--- a/numpy/matrixlib/tests/test_defmatrix.py
++++ b/numpy/matrixlib/tests/test_defmatrix.py
+@@ -409,7 +409,7 @@ def test_shape(self):
+ 
+     def test_numpy_ravel(self):
+         assert_equal(np.ravel(self.a).shape, (2,))
+-        assert_equal(np.ravel(self.m).shape, (2,))
++        assert_equal(np.ravel(self.m).shape, (1, 2))
+ 
+     def test_member_ravel(self):
+         assert_equal(self.a.ravel().shape, (2,))
+@@ -420,12 +420,16 @@ def test_member_flatten(self):
+         assert_equal(self.m.flatten().shape, (1, 2))
+ 
+     def test_numpy_ravel_order(self):
+-        for t in array, matrix:
+-            x = t([[1, 2, 3], [4, 5, 6]])
+-            assert_equal(np.ravel(x), [1, 2, 3, 4, 5, 6])
+-            assert_equal(np.ravel(x, order='F'), [1, 4, 2, 5, 3, 6])
+-            assert_equal(np.ravel(x.T), [1, 4, 2, 5, 3, 6])
+-            assert_equal(np.ravel(x.T, order='A'), [1, 2, 3, 4, 5, 6])
++        x = array([[1, 2, 3], [4, 5, 6]])
++        assert_equal(np.ravel(x), [1, 2, 3, 4, 5, 6])
++        assert_equal(np.ravel(x, order='F'), [1, 4, 2, 5, 3, 6])
++        assert_equal(np.ravel(x.T), [1, 4, 2, 5, 3, 6])
++        assert_equal(np.ravel(x.T, order='A'), [1, 2, 3, 4, 5, 6])
++        x = matrix([[1, 2, 3], [4, 5, 6]])
++        assert_equal(np.ravel(x), [[1, 2, 3, 4, 5, 6]])
++        assert_equal(np.ravel(x, order='F'), [[1, 4, 2, 5, 3, 6]])
++        assert_equal(np.ravel(x.T), [[1, 4, 2, 5, 3, 6]])
++        assert_equal(np.ravel(x.T, order='A'), [[1, 2, 3, 4, 5, 6]])
+ 
+     def test_matrix_ravel_order(self):
+         x = matrix([[1, 2, 3], [4, 5, 6]])

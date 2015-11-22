@@ -1,0 +1,73 @@
+From b34800aa8c764650924a30b027f4bbe95df65c7e Mon Sep 17 00:00:00 2001
+From: Charles Harris <charlesr.harris@gmail.com>
+Date: Mon, 5 May 2014 11:20:22 -0600
+Subject: [PATCH] BUG: Fix test error in scipy introduced by commit d8fd283.
+
+Revert "ENH: ma.asarray() and ma.asanyarray() will pass through input
+        of the correct type."
+
+This reverts commit d8fd28389adb491e24b7cdc25cd1b20f539310c3.
+
+That commit caused test errors in scipy, which was apparently
+expecting a copy rather than a passed through array. The idea
+may be good, but at a minimum it should probably be preceded
+by a deprecation period.
+
+Closes #4675.
+---
+ numpy/ma/core.py            |  4 ----
+ numpy/ma/tests/test_core.py | 15 +--------------
+ 2 files changed, 1 insertion(+), 18 deletions(-)
+
+diff --git a/numpy/ma/core.py b/numpy/ma/core.py
+index fe3c037..bb5c966 100644
+--- a/numpy/ma/core.py
++++ b/numpy/ma/core.py
+@@ -7018,8 +7018,6 @@ def asarray(a, dtype=None, order=None):
+     <class 'numpy.ma.core.MaskedArray'>
+ 
+     """
+-    if dtype is None and type(a) is MaskedArray:                                  ##################type 动态特性在说明文档中
+-        return a
+     return masked_array(a, dtype=dtype, copy=False, keep_mask=True, subok=False)
+ 
+ def asanyarray(a, dtype=None):
+@@ -7065,8 +7063,6 @@ def asanyarray(a, dtype=None):
+     <class 'numpy.ma.core.MaskedArray'>
+ 
+     """
+-    if dtype is None and isinstance(a, MaskedArray):                               ##################isinstance 动态特性在说明文档中
+-        return a
+     return masked_array(a, dtype=dtype, copy=False, keep_mask=True, subok=True)
+ 
+ 
+diff --git a/numpy/ma/tests/test_core.py b/numpy/ma/tests/test_core.py
+index 4a39103..02a1c8c 100644
+--- a/numpy/ma/tests/test_core.py
++++ b/numpy/ma/tests/test_core.py
+@@ -186,24 +186,11 @@ def test_asarray(self):
+         (x, y, a10, m1, m2, xm, ym, z, zm, xf) = self.d
+         xm.fill_value = -9999
+         xm._hardmask = True
+-        xmm = asarray(xm, xm.dtype)
++        xmm = asarray(xm)
+         assert_equal(xmm._data, xm._data)
+         assert_equal(xmm._mask, xm._mask)
+         assert_equal(xmm.fill_value, xm.fill_value)
+         assert_equal(xmm._hardmask, xm._hardmask)
+-        # address gh-4043
+-        self.assertTrue(xm is asarray(xm))
+-
+-    def test_asanyarray(self):
+-        class M(MaskedArray):
+-            pass
+-        xm = M([])
+-        self.assertTrue(xm is not asarray(xm))
+-        # address gh-4043
+-        self.assertTrue(xm is asanyarray(xm))
+-        test = asanyarray(xm, np.int64)
+-        self.assertTrue(isinstance(test, M))                               ##################isinstance 动态特性
+-        assert_equal(test.dtype, np.int64)
+ 
+     def test_fix_invalid(self):
+         # Checks fix_invalid.
